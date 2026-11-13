@@ -632,15 +632,17 @@ const colliders = [];                                     // {x, z, r} trunk cyl
     trees.push({ x, z, scale: 14 + R() * 10, rot: R() * 6.283, variant: Math.floor(R() * CFG.treeVariants) });
   }
 }
-for (const t of trees) {
+/** Builds one tree's meshes and collision cylinder and remembers them on its record. */
+function buildTree(t) {
   const v = variants[t.variant];
   const lod = new THREE.LOD();
   lod.addLevel(new THREE.Mesh(v.hi, treeMat), 0);
   lod.addLevel(new THREE.Mesh(v.lo, treeMat), CFG.lodDistance);
   lod.position.set(t.x, 0, t.z); lod.rotation.y = t.rot; lod.scale.setScalar(t.scale);
   scene.add(lod);
-  colliders.push({ x: t.x, z: t.z, r: v.hi.userData.trunkR * t.scale * 1.35 });
+  t.lod = lod; t.col = { x: t.x, z: t.z, r: v.hi.userData.trunkR * t.scale * 1.35 };
 }
+trees.forEach((t, i) => { t.i = i; buildTree(t); colliders.push(t.col); });
 
 // --- The hero tree: largest and brightest, alone in the central clearing
 const heroGeo = generateTree(20071120, CFG.heroDepth, { limbsMin: 4, limbsMax: 5, trunkR: 0.031, tilt: 0.32, tiltRange: 0.3, outward: 0.025 });
@@ -657,16 +659,16 @@ const decalMat = new THREE.MeshBasicMaterial({
   map: glowTex, color: 0xa9c0ff, transparent: true, opacity: 0.36, depthWrite: false,
   polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
 });
-{
-  const decals = new THREE.InstancedMesh(new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2), decalMat, trees.length);
-  const m = new THREE.Matrix4(), q = new THREE.Quaternion(), s = new V3();
-  trees.forEach((t, i) => {
-    s.setScalar(t.scale * 1.25);
-    m.compose(new V3(t.x, 0.03, t.z), q, s); decals.setMatrixAt(i, m);
-  });
-  decals.frustumCulled = false;
-  scene.add(decals);
+const treeDecals = new THREE.InstancedMesh(new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2), decalMat, trees.length + 10);
+treeDecals.count = trees.length; treeDecals.frustumCulled = false;
+scene.add(treeDecals);
+const _dm = new THREE.Matrix4(), _dq = new THREE.Quaternion(), _ds = new V3(), _dp = new V3();
+/** Places (or, with scale 0, hides) the pool of light under tree number i. */
+function setTreeDecal(i, x, z, scale) {
+  _ds.setScalar(Math.max(scale, 0.0001) * 1.25);
+  _dm.compose(_dp.set(x, 0.03, z), _dq, _ds); treeDecals.setMatrixAt(i, _dm); treeDecals.instanceMatrix.needsUpdate = true;
 }
+trees.forEach((t, i) => setTreeDecal(i, t.x, t.z, t.scale));
 const heroDecalMat = decalMat.clone(); heroDecalMat.opacity = 0.55;
 const heroDecal = new THREE.Mesh(new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2), heroDecalMat);
 heroDecal.position.y = 0.04; heroDecal.scale.setScalar(CFG.heroScale * 1.7);
@@ -1286,7 +1288,8 @@ const owls = [];
 {
   const byDist = trees.map((t, i) => i).sort((a, b) => Math.hypot(trees[a].x, trees[a].z) - Math.hypot(trees[b].x, trees[b].z));
   const picks = [...byDist.slice(0, 3), ...byDist.filter((_, i) => i > 3 && i % 9 === 0)].slice(0, IS_MOBILE ? 7 : 12);
-  picks.forEach((ti, i) => { const t = trees[ti]; owls.push(makeOwl(1200 + i, t.x, variants[t.variant].hi.userData.forkY * t.scale + 0.25, t.z)); });
+  picks.forEach((ti, i) => { const t = trees[ti]; t.owl = true;   // giants leave owl trees alone
+    owls.push(makeOwl(1200 + i, t.x, variants[t.variant].hi.userData.forkY * t.scale + 0.25, t.z)); });
 }
 function updateOwl(o, dt, t, pp, active) {
   const p = o.root.position, dist = active ? Math.hypot(p.x - pp.x, p.z - pp.z) : 999;
@@ -1302,6 +1305,267 @@ function updateWildlife(dt, t) {
   for (const d of deer) updateDeer(d, dt, t, pp, active);
   for (const r of rabbits) updateRabbit(r, dt, pp, active);
   for (const o of owls) updateOwl(o, dt, t, pp, active);
+}
+
+/* =====================================================================
+   5c. STICK GIANTS  (immense, harmless wanderers on the horizon)
+   ===================================================================== */
+const GIANT_SCALE = 7.2;                                   // built 10 units tall, so about 72 units: over twice the hero tree
+let quake = 0;                                             // camera tremor, bumped by each footfall
+function makeGiant(seed, x, z) {
+  const R = rng(seed);
+  // its own unfogged material, so the silhouette still reads through the haze; brightness follows distance
+  const mat = new THREE.MeshBasicMaterial({ color: 0x4a5fa8, vertexColors: true, side: THREE.DoubleSide, fog: false });
+  const mesh = tb => new THREE.Mesh(tb.build(), mat);
+  /** A limb: several twisted twigs running roughly from a to b. */
+  const bundle = (tb, a, b, n, spread, r0, r1, bend = 0.07) => {
+    for (let k = 0; k < n; k++) {
+      const j = () => new V3((R() - 0.5) * spread, (R() - 0.5) * spread * 0.5, (R() - 0.5) * spread);
+      twigTo(tb, R, a.clone().add(j()), b.clone().add(j().multiplyScalar(0.6)), r0 * (0.7 + R() * 0.5), r1 * (0.7 + R() * 0.5), bend * (R() < 0.5 ? -1 : 1), 6, 5);
+    }
+  };
+  const g = { root: new THREE.Group(), torso: new THREE.Group(), head: new THREE.Group(), legs: [], knees: [], arms: [], elbows: [], mat,
+    facing: R() * 6.283, phase: R() * 6.283, step: 0, tx: x, tz: z, seed,
+    mode: 'walk', timer: 0, tree: null, lean: 0, crouch: 0, reach: 0, carry: 0, walk: 1 };
+  g.root.scale.setScalar(GIANT_SCALE);
+
+  // legs: thigh pivots at the hip, shin pivots at the knee, splayed twig toes
+  for (const side of [-1, 1]) {
+    const hip = new THREE.Group(), knee = new THREE.Group();
+    let tb = new TubeBuilder();
+    bundle(tb, new V3(0, 0, 0), new V3(side * 0.05, -2.6, 0.05), 5, 0.3, 0.13, 0.1);
+    twigKnot(tb, R, new V3(0, -2.6, 0), 0.24, 0.24, 0.24, 5, 0.035);
+    hip.add(mesh(tb));
+    tb = new TubeBuilder();
+    bundle(tb, new V3(0, 0, 0), new V3(0, -2.55, 0), 4, 0.26, 0.1, 0.075);
+    for (let f = -2; f <= 2; f++) twigTo(tb, R, new V3(0, -2.5, 0), new V3(f * 0.24, -2.6, 0.75 - Math.abs(f) * 0.12 + R() * 0.1), 0.06, 0.015, 0.12, 4, 4);
+    twigTo(tb, R, new V3(0, -2.5, 0), new V3(side * 0.1, -2.6, -0.4), 0.05, 0.015, 0.1, 3, 4);
+    knee.add(mesh(tb)); knee.position.y = -2.6; hip.add(knee);
+    hip.position.set(side * 0.62, 5.2, 0);
+    g.root.add(hip); g.legs.push(hip); g.knees.push(knee);
+  }
+  // torso: a tall cage of bowed twigs from pelvis to shoulders
+  let tb = new TubeBuilder();
+  for (let k = 0; k < 12; k++) {
+    const a = k / 12 * 6.283, a2 = a + 0.6;
+    twigTo(tb, R, new V3(Math.cos(a) * 0.6, 0, Math.sin(a) * 0.4), new V3(Math.cos(a2) * 0.95, 3.1, Math.sin(a2) * 0.5), 0.1, 0.07, 0.12, 7, 5);
+  }
+  twigKnot(tb, R, new V3(0, 0.1, 0), 0.75, 0.4, 0.5, 7, 0.05);
+  bundle(tb, new V3(-1.2, 3.1, 0), new V3(1.2, 3.1, 0), 4, 0.25, 0.09, 0.09);          // shoulders
+  bundle(tb, new V3(0, 3.0, 0), new V3(0, 3.75, 0.12), 4, 0.2, 0.08, 0.06);            // neck
+  for (let k = 0; k < 7; k++) {                                                        // broken branches bristling from the back
+    const p = new V3((R() - 0.5) * 1.6, 1.4 + R() * 1.7, -0.3);
+    twigTo(tb, R, p, p.clone().add(new V3((R() - 0.5) * 0.9, 0.5 + R() * 0.9, -0.5 - R() * 0.7)), 0.05, 0.012, 0.15, 4, 4);
+  }
+  g.torso.add(mesh(tb));
+  // head: a small knot crowned with antler-like branches
+  tb = new TubeBuilder();
+  twigKnot(tb, R, new V3(0, 0, 0), 0.4, 0.46, 0.42, 12, 0.035);
+  for (const side of [-1, 1]) {
+    const base = new V3(side * 0.2, 0.3, 0), tip = new V3(side * (0.7 + R() * 0.3), 1.3 + R() * 0.4, -0.15);
+    twigTo(tb, R, base, tip, 0.06, 0.02, 0.18, 6, 5);
+    for (const t of [0.35, 0.6, 0.82]) {
+      const p = base.clone().lerp(tip, t);
+      twigTo(tb, R, p, p.clone().add(new V3(side * (0.1 + R() * 0.3), 0.35 + R() * 0.3, 0.2 + R() * 0.2)), 0.035, 0.01, 0.15, 4, 4);
+    }
+  }
+  g.head.add(mesh(tb)); g.head.position.set(0, 4.15, 0.15); g.torso.add(g.head);
+  // arms: long enough to hang past the knees, with trailing finger twigs
+  for (const side of [-1, 1]) {
+    const arm = new THREE.Group(), elbow = new THREE.Group();
+    tb = new TubeBuilder();
+    bundle(tb, new V3(0, 0, 0), new V3(side * 0.12, -2.3, 0), 4, 0.22, 0.09, 0.07);
+    arm.add(mesh(tb));
+    tb = new TubeBuilder();
+    bundle(tb, new V3(0, 0, 0), new V3(0, -2.4, 0.1), 3, 0.18, 0.07, 0.045);
+    for (let f = -2; f <= 2; f++) twigTo(tb, R, new V3(0, -2.35, 0.1), new V3(f * 0.13, -3.1 - R() * 0.35, 0.15 + R() * 0.2), 0.035, 0.008, 0.14, 4, 4);
+    elbow.add(mesh(tb)); elbow.position.y = -2.3; arm.add(elbow);
+    arm.position.set(side * 1.2, 3.1, 0);
+    g.torso.add(arm); g.arms.push(arm); g.elbows.push(elbow);
+  }
+  g.torso.position.y = 5.2; g.torso.rotation.x = 0.14;      // a slight stoop
+  g.root.add(g.torso);
+  g.root.position.set(x, 0, z);
+  scene.add(g.root);
+  return g;
+}
+const giants = [[135, -95], [-150, 60], [45, 168]].slice(0, IS_MOBILE ? 2 : 3).map(([x, z], i) => makeGiant(3100 + i * 17, x, z));
+
+/** A deep, soft footfall; louder the nearer the giant is. */
+function playThud(vol) {
+  const ctx = audio.ctx; if (!ctx || vol < 0.02) return;
+  const osc = ctx.createOscillator(), g = ctx.createGain(), t0 = ctx.currentTime;
+  osc.type = 'sine'; osc.frequency.setValueAtTime(58, t0); osc.frequency.exponentialRampToValueAtTime(30, t0 + 0.6);
+  g.gain.setValueAtTime(0, t0); g.gain.linearRampToValueAtTime(0.5 * vol, t0 + 0.03); g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.9);
+  osc.connect(g); g.connect(audio.master); osc.start(t0); osc.stop(t0 + 1);
+}
+const _foot = new V3(), _hand = new V3();
+const REACH = 19;                                          // how far ahead of its feet a stooping giant's hands meet the ground
+const saplings = [], settling = [];
+let plantedExtra = 0;
+/** Tremor, thud and a puff of sparks at a spot; stronger when the player is near. */
+function groundJolt(x, z, strength) {
+  if (state !== 'play' && state !== 'won') return;
+  const pp = player.root.position, k = clamp(1 - Math.hypot(x - pp.x, z - pp.z) / 210, 0, 1);
+  quake = Math.max(quake, (0.045 + 0.3 * k * k) * strength);
+  playThud(Math.min(1, (0.15 + 0.85 * k * k) * strength));
+  spawnBurst(_foot.set(x, 0.5, z), Math.round(45 * Math.min(2, strength)), 5);
+}
+function farPoint(rMin, rMax) {
+  const a = Math.random() * 6.283, r = rMin + Math.random() * (rMax - rMin);
+  return [clamp(Math.sin(a) * r, -185, 185), clamp(Math.cos(a) * r, -185, 185)];
+}
+/** Nearest tree a giant may take (never one with an owl in it, or one still growing). */
+function pickTree(g) {
+  let best = null, bd = 140;
+  for (const tr of trees) {
+    if (tr.owl || tr.taken || tr.growing) continue;
+    const d = Math.hypot(tr.x - g.root.position.x, tr.z - g.root.position.z);
+    if (d > 30 && d < bd) { bd = d; best = tr; }
+  }
+  return best;
+}
+const spotAhead = g => [g.root.position.x + Math.sin(g.facing) * REACH, g.root.position.z + Math.cos(g.facing) * REACH];
+const spotFree = (x, z) => Math.abs(x) < 188 && Math.abs(z) < 188 && Math.hypot(x, z) > 50 && clearOfTrunks(x, z, 9)
+  && Math.hypot(x - player.root.position.x, z - player.root.position.z) > 6;
+/** At each waypoint a giant decides: pull up a tree, plant a new one, or just keep wandering. */
+function chooseNext(g) {
+  const r = Math.random();
+  if (r < 0.4) { const tr = pickTree(g); if (tr) { tr.taken = true; g.tree = tr; g.mode = 'toTree'; return; } }
+  else if (r < 0.62 && plantedExtra < 8 && treeDecals.count < treeDecals.instanceMatrix.count) {
+    const [sx, sz] = spotAhead(g); if (spotFree(sx, sz)) { g.mode = 'sow'; g.timer = 0; return; }
+  }
+  [g.tx, g.tz] = farPoint(75, 180); g.mode = 'walk';
+}
+/** The tree comes out of the ground and into the giant's hand. */
+function uproot(g) {
+  const tr = g.tree;
+  tr.lod.rotation.z = 0;
+  g.elbows[1].attach(tr.lod);                              // keeps its place in the world, now moves with the hand
+  const ci = colliders.indexOf(tr.col); if (ci >= 0) colliders.splice(ci, 1);
+  setTreeDecal(tr.i, tr.x, tr.z, 0);
+  groundJolt(tr.x, tr.z, 1.8);
+  g.mode = 'lift'; g.timer = 0;
+}
+/** The carried tree is set down and takes root where the giant stoops. */
+function replant(g) {
+  const tr = g.tree;
+  scene.attach(tr.lod);
+  tr.x = tr.lod.position.x; tr.z = tr.lod.position.z;
+  tr.lod.scale.setScalar(tr.scale);
+  tr.col.x = tr.x; tr.col.z = tr.z; colliders.push(tr.col);
+  setTreeDecal(tr.i, tr.x, tr.z, tr.scale);
+  settling.push({ tr, t: 0 });                             // eases upright over the next moments
+  tr.taken = false; g.tree = null;
+  groundJolt(tr.x, tr.z, 1.4);
+  g.mode = 'rise'; g.timer = 0;
+}
+/** A new tree is pressed into the ground and grows up over a few seconds. */
+function sow(g) {
+  const [x, z] = spotAhead(g);
+  if (spotFree(x, z)) {
+    const tr = { x, z, scale: 13 + Math.random() * 8, rot: Math.random() * 6.283, variant: Math.floor(Math.random() * CFG.treeVariants), growing: true, grow: 0 };
+    tr.i = treeDecals.count++; buildTree(tr); tr.lod.scale.setScalar(0.001);
+    trees.push(tr); saplings.push(tr); plantedExtra++;
+    groundJolt(x, z, 0.8);
+  }
+  g.mode = 'rise'; g.timer = 0;
+}
+function updateGiants(dt, t) {
+  const active = state === 'play' || state === 'won';
+  for (const g of giants) {
+    const p = g.root.position;
+    let moving = false, leanT = 0, crouchT = 0, reachT = 0, carryT = 0;
+    g.timer += dt;
+    const steer = (x, z, rate) => { g.facing += wrapAngle(Math.atan2(x - p.x, z - p.z) - g.facing) * damp(dt, rate); };
+    switch (g.mode) {
+      case 'walk':                                            // wander between far-off waypoints
+        if (Math.hypot(g.tx - p.x, g.tz - p.z) < 12) chooseNext(g); else { steer(g.tx, g.tz, 0.35); moving = true; }
+        break;
+      case 'toTree': {                                        // stride up to the chosen tree and square up to it
+        const tr = g.tree, d = Math.hypot(tr.x - p.x, tr.z - p.z);
+        const off = Math.abs(wrapAngle(Math.atan2(tr.x - p.x, tr.z - p.z) - g.facing));
+        if (d > REACH + 1) { steer(tr.x, tr.z, 0.9); moving = true; }
+        else if (off > 0.06) steer(tr.x, tr.z, 1.6);
+        else { g.mode = 'grab'; g.timer = 0; }
+        break; }
+      case 'grab':                                            // stoop, take hold, and wrench it loose
+        leanT = 1; crouchT = 0.7; reachT = 1;
+        if (g.timer > 2) g.tree.lod.rotation.z = Math.sin(t * 28) * 0.035 * Math.min(1, g.timer - 2);
+        if (g.timer > 3.4 && g.lean > 0.94) uproot(g);
+        break;
+      case 'lift':                                            // straighten up with the tree against its shoulder
+        carryT = 1;
+        if (g.timer > 3.2) { g.mode = 'carry'; [g.tx, g.tz] = farPoint(150, 182); }
+        break;
+      case 'carry':                                           // walk off into the distance with it
+        carryT = 1;
+        if (Math.hypot(g.tx - p.x, g.tz - p.z) < 12) {
+          const [sx, sz] = spotAhead(g);
+          if (spotFree(sx, sz)) { g.mode = 'lower'; g.timer = 0; } else [g.tx, g.tz] = farPoint(120, 182);
+        } else { steer(g.tx, g.tz, 0.35); moving = true; }
+        break;
+      case 'lower':                                           // stoop and set it back into the earth
+        leanT = 1; crouchT = 0.7; reachT = 1; carryT = 1;
+        if (g.timer > 3.4 && g.lean > 0.94) replant(g);
+        break;
+      case 'sow':                                             // stoop and plant a brand-new tree
+        leanT = 1; crouchT = 0.7; reachT = 1;
+        if (g.timer > 3.4 && g.lean > 0.94) sow(g);
+        break;
+      case 'rise':
+        if (g.timer > 3) { g.mode = 'walk'; [g.tx, g.tz] = farPoint(75, 180); }
+        break;
+    }
+    g.lean = lerp(g.lean, leanT, damp(dt, 1.3)); g.crouch = lerp(g.crouch, crouchT, damp(dt, 1.3));
+    g.reach = lerp(g.reach, reachT, damp(dt, 1.5)); g.carry = lerp(g.carry, carryT, damp(dt, 1.2));
+    g.walk = lerp(g.walk, moving ? 1 : 0, damp(dt, 2));
+
+    g.phase += dt * 0.7 * g.walk;                             // one slow stride every nine seconds
+    const s = Math.sin(g.phase), swing = 0.5 * g.walk, legLen = 5.2 * GIANT_SCALE, c = g.crouch;
+    const speed = 2 * legLen * Math.sin(0.5) * 0.7 / 6.283 * g.walk;
+    p.x += Math.sin(g.facing) * speed * dt; p.z += Math.cos(g.facing) * speed * dt;
+    p.y = (Math.cos(swing * s) - 1) * legLen * (1 - c) - (1 - Math.cos(0.8 * c)) * legLen;   // hips dip with each stride, and sink when it stoops
+    g.root.rotation.y = g.facing;
+    g.legs[0].rotation.x = lerp(-s * swing, -0.8, c); g.legs[1].rotation.x = lerp(s * swing, -0.8, c);
+    g.knees[0].rotation.x = lerp(0.55 * g.walk * Math.max(0, Math.cos(g.phase)), 1.6, c);
+    g.knees[1].rotation.x = lerp(0.55 * g.walk * Math.max(0, -Math.cos(g.phase)), 1.6, c);
+    const torsoLean = 0.14 + g.lean * 0.9, down = -torsoLean;  // "down": arm angle that hangs straight to the ground
+    g.torso.rotation.x = torsoLean;
+    g.torso.rotation.z = Math.cos(g.phase) * 0.035 * g.walk; g.torso.rotation.y = s * 0.07 * g.walk;
+    g.arms[0].rotation.x = lerp(s * 0.24 * g.walk, down, g.reach);
+    g.arms[0].rotation.z = lerp(-0.07, 0.23, g.reach);
+    g.arms[1].rotation.x = lerp(lerp(-s * 0.24 * g.walk, down, g.reach), -0.5, g.carry * (1 - g.reach));
+    g.arms[1].rotation.z = lerp(0.07, -0.23, Math.max(g.reach, g.carry));
+    g.elbows[0].rotation.x = lerp(-0.2 - 0.12 * s * g.walk, 0, g.reach);
+    g.elbows[1].rotation.x = lerp(-0.2 + 0.12 * s * g.walk, 0, Math.max(g.reach, g.carry));
+    g.head.rotation.y = Math.sin(t * 0.17 + g.seed) * 0.5 * (1 - g.lean); g.head.rotation.x = 0.12 + Math.sin(t * 0.11 + g.seed) * 0.08;
+    // brightness by distance: a pale shape on the horizon, glowing white when it looms close
+    const dist = Math.hypot(p.x - camera.position.x, p.z - camera.position.z), near = clamp(1 - (dist - 40) / 150, 0, 1);
+    g.mat.color.setRGB(lerp(0.2, 0.95, near), lerp(0.28, 1.0, near), lerp(0.55, 1.15, near));
+    // footfall: every half stride a foot lands, the ground trembles, dust lifts, a thud rolls out
+    const step = Math.floor((g.phase - Math.PI / 2) / Math.PI);
+    if (step !== g.step) {
+      g.step = step;
+      if (active && g.walk > 0.5) {
+        const side = step % 2 ? 1 : -1, fwd = Math.sin(0.5) * legLen;
+        groundJolt(p.x + Math.sin(g.facing) * fwd + Math.cos(g.facing) * side * 4.5, p.z + Math.cos(g.facing) * fwd - Math.sin(g.facing) * side * 4.5, 1);
+      }
+    }
+  }
+  // newly planted trees grow; replanted ones settle upright
+  for (let i = saplings.length - 1; i >= 0; i--) {
+    const tr = saplings[i]; tr.grow = Math.min(1, tr.grow + dt / 9);
+    const k = tr.grow * tr.grow * (3 - 2 * tr.grow);
+    tr.lod.scale.setScalar(tr.scale * Math.max(0.001, k)); setTreeDecal(tr.i, tr.x, tr.z, tr.scale * k);
+    if (tr.grow >= 1) { tr.growing = false; colliders.push(tr.col); saplings.splice(i, 1); }
+  }
+  for (let i = settling.length - 1; i >= 0; i--) {
+    const sIt = settling[i], o = sIt.tr.lod, k = damp(dt, 2.5); sIt.t += dt;
+    o.rotation.x = lerp(o.rotation.x, 0, k); o.rotation.z = lerp(o.rotation.z, 0, k); o.position.y = lerp(o.position.y, 0, k);
+    if (sIt.t > 4) { o.rotation.x = o.rotation.z = 0; o.position.y = 0; settling.splice(i, 1); }
+  }
+  quake *= Math.exp(-dt * 2.4);
 }
 
 /* =====================================================================
@@ -2023,6 +2287,11 @@ function frame() {
   updateMotes(dt, t);
   updateFireflies(dt, t);
   updateWildlife(dt, t);
+  updateGiants(dt, t);
+  if (quake > 0.002) {                                     // the whole place shakes a little with each giant step
+    camera.position.x += Math.sin(t * 31) * quake; camera.position.y += Math.sin(t * 37 + 1) * quake * 1.3;
+    camera.rotation.z += Math.sin(t * 29 + 2) * quake * 0.012;
+  }
 
   // haze thickens as you step from the cover into the forest; plants follow the player
   scene.fog.density = lerp(scene.fog.density, state === 'title' ? 0.004 : 0.0125, damp(dt, 0.7));
